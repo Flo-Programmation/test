@@ -352,10 +352,7 @@ window.addEventListener("load", function () {
   ];
   var DEFAULT_CAT = { label: "Tech & Numérique", icon: "fa-microchip", grad: "linear-gradient(135deg,#475569,#64748b)" };
 
-  /* ── Sources RSS – double proxy pour fiabilité maximale ── */
-  var RSS2JSON   = "https://api.rss2json.com/v1/api.json?count=12&rss_url=";
-  var CORSPROXY  = "https://corsproxy.io/?";
-
+  /* ── Sources RSS ── */
   var RSS_SOURCES = [
     /* ── 🇫🇷 Cybersécurité FR ── */
     { name: "LeMonde Informatique – Sécu",  url: "https://www.lemondeinformatique.fr/flux-rss/thematique/securite/rss.xml" },
@@ -405,23 +402,50 @@ window.addEventListener("load", function () {
   }
   function trunc(s, n) { s = s || ""; return s.length > n ? s.slice(0,n).trim()+"…" : s; }
 
-  /* ── Parse XML brut (fallback corsproxy) ── */
+  /* ── Proxies en cascade – compatibles GitHub Pages ── */
+  var PROXIES = [
+    function(url) {
+      return "https://api.rss2json.com/v1/api.json?count=12&rss_url=" + encodeURIComponent(url);
+    },
+    function(url) {
+      return "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
+    },
+    function(url) {
+      return "https://thingproxy.freeboard.io/fetch/" + url;
+    }
+  ];
+
+  /* ── Fetch avec timeout manuel (compatible tous navigateurs) ── */
+  function fetchWithTimeout(url, ms) {
+    return new Promise(function(resolve, reject) {
+      var timer = setTimeout(function() { reject(new Error("timeout")); }, ms);
+      fetch(url).then(function(r) {
+        clearTimeout(timer);
+        resolve(r);
+      }).catch(function(e) {
+        clearTimeout(timer);
+        reject(e);
+      });
+    });
+  }
+
+  /* ── Parse XML brut ── */
   function parseXML(xmlText, srcName) {
     try {
       var doc = new DOMParser().parseFromString(xmlText, "text/xml");
       var items = doc.querySelectorAll("item, entry");
       var out = [];
       items.forEach(function(it) {
-        var title   = it.querySelector("title");
-        var link    = it.querySelector("link");
-        var desc    = it.querySelector("description, summary, content");
-        var date    = it.querySelector("pubDate, published, updated");
+        var title    = it.querySelector("title");
+        var link     = it.querySelector("link");
+        var desc     = it.querySelector("description, summary, content");
+        var date     = it.querySelector("pubDate, published, updated");
         var linkHref = link ? (link.getAttribute("href") || link.textContent || "").trim() : "#";
         out.push({
-          title:  title  ? stripHtml(title.textContent)  : "Sans titre",
+          title:  title ? stripHtml(title.textContent) : "Sans titre",
           link:   linkHref || "#",
-          desc:   desc   ? stripHtml(desc.textContent)   : "",
-          date:   date   ? date.textContent               : "",
+          desc:   desc  ? stripHtml(desc.textContent)  : "",
+          date:   date  ? date.textContent              : "",
           source: srcName
         });
       });
@@ -429,10 +453,10 @@ window.addEventListener("load", function () {
     } catch(e) { return []; }
   }
 
-  /* ── Fetch via rss2json (primaire) puis corsproxy (fallback) ── */
-  function fetchSource(src) {
-    /* Tentative 1 : rss2json */
-    return fetch(RSS2JSON + encodeURIComponent(src.url), { signal: AbortSignal.timeout(8000) })
+  /* ── Fetch via rss2json (primaire) ── */
+  function tryRss2json(src) {
+    var url = "https://api.rss2json.com/v1/api.json?count=12&rss_url=" + encodeURIComponent(src.url);
+    return fetchWithTimeout(url, 9000)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (data.status === "ok" && data.items && data.items.length) {
@@ -446,15 +470,27 @@ window.addEventListener("load", function () {
             };
           });
         }
-        throw new Error("rss2json empty");
-      })
-      .catch(function() {
-        /* Tentative 2 : corsproxy → parse XML direct */
-        return fetch(CORSPROXY + encodeURIComponent(src.url), { signal: AbortSignal.timeout(8000) })
-          .then(function(r) { return r.text(); })
-          .then(function(txt) { return parseXML(txt, src.name); })
-          .catch(function() { return []; });
+        throw new Error("empty");
       });
+  }
+
+  /* ── Fallback : allorigins → parse XML ── */
+  function tryAllOrigins(src) {
+    var url = "https://api.allorigins.win/get?url=" + encodeURIComponent(src.url);
+    return fetchWithTimeout(url, 9000)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var items = parseXML(data.contents || "", src.name);
+        if (!items.length) throw new Error("empty");
+        return items;
+      });
+  }
+
+  /* ── Fetch d'une source : rss2json → allorigins → [] ── */
+  function fetchSource(src) {
+    return tryRss2json(src)
+      .catch(function() { return tryAllOrigins(src); })
+      .catch(function() { return []; });
   }
 
   /* ── Construction d'une carte ── */
